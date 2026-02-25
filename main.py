@@ -193,3 +193,56 @@ def analyze_public(req: AnalyzeRequest):
         "nota": "Esta é a Fase 1 (cadastro + jurisdição). A Fase 2 adiciona varredura automática de TJ/TRT/TRF via fontes públicas e indexadores."
     }
     return resultado
+
+class EvidenceRequest(BaseModel):
+    cnpj: str
+    razao_social: str | None = None
+
+@app.post("/evidence_search")
+def evidence_search(req: EvidenceRequest):
+    """
+    Busca evidências públicas via páginas indexadas (ex.: JusBrasil).
+    Não é 'varredura judicial oficial', mas aponta sinais e links auditáveis.
+    """
+    cnpj_digits = normalize_cnpj(req.cnpj)
+    if len(cnpj_digits) != 14:
+        return {"error": "cnpj_invalido", "message": "CNPJ deve ter 14 dígitos."}
+
+    razao = (req.razao_social or "").strip()
+    q_main = cnpj_digits if cnpj_digits else razao
+
+    results = {
+        "query": q_main,
+        "links": [],
+        "notes": [],
+        "limitations": [],
+    }
+
+    # JusBrasil
+    results["links"].append({
+        "title": "JusBrasil - busca",
+        "url": f"https://www.jusbrasil.com.br/busca?q={q_main}"
+    })
+
+    # Escavador (opcional, mais um índice público)
+    results["links"].append({
+        "title": "Escavador - busca",
+        "url": f"https://www.escavador.com/busca?qo={q_main}"
+    })
+
+    # Google (link pronto; não fazemos scraping do Google)
+    results["links"].append({
+        "title": "Google - busca (abra e confira)",
+        "url": f"https://www.google.com/search?q={q_main}"
+    })
+
+    # Pesquisas temáticas prontas (bom para detectar padrão)
+    for term in ["execução", "execução fiscal", "protesto", "cobrança", "falência", "recuperação judicial", "trabalhista"]:
+        results["links"].append({
+            "title": f"Busca: {term}",
+            "url": f"https://www.google.com/search?q={q_main}+{term}"
+        })
+
+    results["notes"].append("Esses links são evidências públicas indexadas. Use para validar achados e filtrar homônimos.")
+    results["limitations"].append("Não é uma varredura oficial consolidada de tribunais; portais podem exigir captcha/login.")
+    return results
