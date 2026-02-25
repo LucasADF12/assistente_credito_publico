@@ -55,4 +55,25 @@ def analyze_public(req: AnalyzeRequest):
         "note": "Este endpoint é o começo. Ele existe para conectar no GPT Actions e provar o fluxo."
     }
     return report
+    
+from fastapi.openapi.utils import get_openapi
 
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    openapi_schema = get_openapi(
+        title="Assistente Crédito Público",
+        version="1.0.0",
+        routes=app.routes,
+    )
+
+    openapi_schema["servers"] = [
+        {"url": "https://assistente-credito-publico.onrender.com"}
+    ]
+
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi
