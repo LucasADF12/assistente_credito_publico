@@ -3,12 +3,12 @@ from pydantic import BaseModel
 import httpx
 from bs4 import BeautifulSoup
 
+RENDER_URL = "https://assistente-credito-publico.onrender.com"
+
 app = FastAPI(
     title="Assistente Crédito Público",
     version="1.0.0",
-    servers=[
-        {"url": "https://assistente-credito-publico.onrender.com"}
-    ]
+    servers=[{"url": RENDER_URL}]
 )
 
 
@@ -55,3 +55,4 @@ def analyze_public(req: AnalyzeRequest):
         "note": "Este endpoint é o começo. Ele existe para conectar no GPT Actions e provar o fluxo."
     }
     return report
+
