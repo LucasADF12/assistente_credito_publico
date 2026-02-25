@@ -4,13 +4,16 @@ from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import re
 from datetime import date, datetime
+from urllib.parse import quote
+
 import httpx
+from bs4 import BeautifulSoup
 
 RENDER_URL = "https://assistente-credito-publico.onrender.com"
 
 app = FastAPI(
     title="Assistente Crédito Público",
-    version="3.0.0",
+    version="4.0.0",
 )
 
 # =========================
@@ -40,6 +43,11 @@ class AnalyzeRequest(BaseModel):
 
 
 class EvidenceRequest(BaseModel):
+    cnpj: str
+    razao_social: Optional[str] = None
+
+
+class PublicSearchRequest(BaseModel):
     cnpj: str
     razao_social: Optional[str] = None
 
@@ -74,7 +82,6 @@ def years_since(iso_date: Optional[str]):
     try:
         d = datetime.fromisoformat(iso_date).date()
     except Exception:
-        # fallback para formatos comuns
         try:
             d = datetime.strptime(iso_date, "%Y-%m-%d").date()
         except Exception:
@@ -127,7 +134,7 @@ TRT_BY_UF = {
     "PI":"TRT22",
     "MT":"TRT23",
     "MS":"TRT24",
-    # SP: TRT2 (Grande SP) e TRT15 (interior)
+    # SP: TRT2 e TRT15
     "SP":"TRT2/TRT15",
 }
 
@@ -136,21 +143,13 @@ def tribunal_links(uf: Optional[str], municipio: Optional[str], cnpj_digits: str
     trf = TRF_BY_UF.get(uf_norm) if uf_norm else None
     trt = TRT_BY_UF.get(uf_norm) if uf_norm else None
 
-    # Links genéricos (para navegação e fallback)
     links = {
         "cadastro_base": "https://brasilapi.com.br",
-        "jusbrasil_busca": None,
-        "tj_home": None,
+        "tj_home": f"https://www.tj{uf_norm.lower()}.jus.br" if uf_norm else None,
         "trt_pje": "https://pje.trt.jus.br/consultaprocessual/",
         "trf_home": None,
+        "jusbrasil_busca": f"https://www.jusbrasil.com.br/busca?q={cnpj_digits}" if cnpj_digits else None,
     }
-
-    q = cnpj_digits if cnpj_digits else (razao_social or "")
-    if q:
-        links["jusbrasil_busca"] = f"https://www.jusbrasil.com.br/busca?q={q}"
-
-    if uf_norm:
-        links["tj_home"] = f"https://www.tj{uf_norm.lower()}.jus.br"
 
     if trf:
         trf_links = {
@@ -236,12 +235,74 @@ def analyze_public(req: AnalyzeRequest):
     return {
         "perfil": profile,
         "jurisdicao": juris,
-        "nota": "Fase 1: Cadastro + Jurisdição (com links para consulta)."
+        "nota": "Cadastro + Jurisdição (fase 1)."
     }
 
 
 # =============================
-# ENDPOINT: EVIDENCE SEARCH (automático)
+# ENDPOINT: SEARCH PUBLIC WEB (DuckDuckGo)
+# =============================
+
+def duckduckgo_search(query: str, max_results: int = 10) -> Dict[str, Any]:
+    """
+    Busca pública via endpoint HTML do DuckDuckGo.
+    Sem API key, mas pode ter limites e mudanças ao longo do tempo.
+    """
+    url = f"https://duckduckgo.com/html/?q={quote(query)}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    try:
+        with httpx.Client(timeout=25, headers=headers, follow_redirects=True) as client:
+            r = client.get(url)
+            if r.status_code != 200:
+                return {"ok": False, "status_code": r.status_code, "url": url}
+
+            soup = BeautifulSoup(r.text, "lxml")
+            results = []
+            for a in soup.select(".result__a")[:max_results]:
+                results.append({
+                    "title": a.get_text(" ", strip=True),
+                    "url": a.get("href"),
+                })
+
+            return {"ok": True, "url": url, "results": results}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200], "url": url}
+
+
+@app.post("/search_public_web")
+def search_public_web(req: PublicSearchRequest):
+    cnpj_digits = normalize_cnpj(req.cnpj)
+    if len(cnpj_digits) != 14:
+        return {"error": "cnpj_invalido", "message": "CNPJ deve ter 14 dígitos."}
+
+    # Queries “jurídico/risco” (sem afirmar nada, só levantar evidências)
+    base = f"\"{cnpj_digits}\""
+    queries = [
+        ("geral", base),
+        ("execucao", f"{base} execução OR execucao"),
+        ("execucao_fiscal", f"{base} \"execução fiscal\" OR \"execucao fiscal\""),
+        ("protesto", f"{base} protesto cartório OR cartorio"),
+        ("falencia_rj", f"{base} falência OR falencia OR \"recuperação judicial\" OR \"recuperacao judicial\""),
+        ("trabalhista", f"{base} trabalhista OR reclamatória OR reclamatoria"),
+    ]
+
+    out = {"cnpj": cnpj_digits, "queries": [], "note": "Resultados via DuckDuckGo (busca pública indexada)."}
+    for label, q in queries:
+        resp = duckduckgo_search(q, max_results=8)
+        out["queries"].append({
+            "label": label,
+            "q": q,
+            "ok": resp.get("ok", False),
+            "results": resp.get("results", []),
+            "meta": {k: v for k, v in resp.items() if k not in ("results",)}
+        })
+
+    return out
+
+
+# =============================
+# ENDPOINT: EVIDENCE SEARCH (opcional; pode bloquear)
 # =============================
 
 KEY_TERMS = {
@@ -318,16 +379,14 @@ def evidence_search(req: EvidenceRequest):
         "note": "Indícios por indexadores. NÃO confirma processos. Requer validação no tribunal."
     }
 
-    links = [
-        {"title": "JusBrasil - busca", "url": jus_url},
-        {"title": "Escavador - busca", "url": esc_url},
-        {"title": "Google - busca", "url": f"https://www.google.com/search?q={q}"},
-    ]
-
     return {
         "query": q,
         "signals": signals,
-        "links": links,
+        "links": [
+            {"title": "JusBrasil - busca", "url": jus_url},
+            {"title": "Escavador - busca", "url": esc_url},
+            {"title": "Google - busca", "url": f"https://www.google.com/search?q={q}"},
+        ],
         "sources": sources,
         "limitations": limitations
     }
@@ -377,7 +436,7 @@ def court_attempt(req: CourtAttemptRequest):
     uf = (req.uf or "").upper().strip() or None
     municipio = (req.municipio or "").strip() or None
 
-    # Se UF/município não vierem, tenta derivar via BrasilAPI
+    # Derivar UF/município se não vierem
     if not uf:
         cadastro = fetch_brasilapi_cnpj(cnpj_digits)
         if cadastro.get("ok"):
@@ -403,7 +462,7 @@ def court_attempt(req: CourtAttemptRequest):
                 "Abra o site do TJ.",
                 "Procure por 'Consulta Processual' ou 'Consulta de Processos'.",
                 "Tente pesquisar por CNPJ (se existir campo) ou por razão social.",
-                "Se houver captcha/JS, a consulta precisará ser manual."
+                "Se houver captcha/JS, a consulta precisa ser manual."
             ],
         })
     else:
@@ -433,7 +492,7 @@ def court_attempt(req: CourtAttemptRequest):
                 "Abra o site do TRF competente.",
                 "Procure por 'Consulta Processual' (e-Proc/PJe/Consulta Pública).",
                 "Pesquise por CNPJ/razão social quando disponível.",
-                "Se houver captcha/JS, a consulta precisará ser manual."
+                "Se houver captcha/JS, a consulta precisa ser manual."
             ],
         })
     else:
