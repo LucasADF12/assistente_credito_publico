@@ -3,7 +3,13 @@ from pydantic import BaseModel
 import httpx
 from bs4 import BeautifulSoup
 
-app = FastAPI(title="Assistente Crédito Público", version="1.0.0")
+app = FastAPI(
+    title="Assistente Crédito Público",
+    version="1.0.0",
+    servers=[
+        {"url": "https://assistente-credito-publico.onrender.com"}
+    ]
+)
 
 
 class AnalyzeRequest(BaseModel):
